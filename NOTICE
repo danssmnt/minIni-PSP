@@ -11,5 +11,5 @@ The C++ class in minIni.h was contributed by Steven Van Ingelgem.
 The option to compile minIni as a read-only library was contributed by Luca
 Bassanello.
 
-This is a fork of the project developed more specifically for the PlayStation: Portable by danssmnt.
+pspIni is a fork of minIni developed more specifically for the PlayStation: Portable by danssmnt.
 It doesn't change much of the original, just removes more unnecessary features and retypes functions.

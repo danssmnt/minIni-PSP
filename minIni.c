@@ -1,5 +1,5 @@
 /*  minIni - Multi-Platform INI file parser, suitable for embedded systems
- *  Optimized for the PlayStation: Portable
+ *  pspIni - A optimized fork for the PlayStation: Portable
  *
  *  These routines are in part based on the article "Multiplatform .INI Files"
  *  by Joseph J. Graf in the March 1994 issue of Dr. Dobb's Journal.
@@ -24,18 +24,18 @@
 
 #define MININI_IMPLEMENTATION
 
+#include <pspkernel.h>
 #include <string.h>
 #include <stdlib.h>
 
 #include "minIni.h"
-#if defined NDEBUG
-  #define assert(e)
-#else
-  #include <assert.h>
-#endif
+#include "minGlue.h"
 
-#if !defined sizearray
-  #define sizearray(a)    (sizeof(a) / sizeof((a)[0]))
+/* Only compile asserts if INI_DEBUG is TRUE */
+#if INI_DEBUG
+  #include <assert.h>
+#else
+  #define assert(e)
 #endif
 
 enum quote_option {
@@ -44,22 +44,46 @@ enum quote_option {
   QUOTE_DEQUOTE,
 };
 
+/* Define strnicmp when PSPSDK LIBC doesn't provide it */
+#ifndef strnicmp
+  /* If strncasecmp exists, just use it, otherwise, define it manually */
+  #ifdef strncasecmp
+    #define strnicmp strncasecmp
+  #else
+    int strnicmp(const char *s1, const char *s2, SceSize n)
+    {
+      while (n-- != 0 && (*s1 || *s2)) {
+        register int c1, c2;
+        c1 = *s1++;
+        if ('a' <= c1 && c1 <= 'z')
+          c1 += ('A' - 'a');
+        c2 = *s2++;
+        if ('a' <= c2 && c2 <= 'z')
+          c2 += ('A' - 'a');
+        if (c1 != c2)
+          return c1 - c2;
+      }
+      return 0;
+    }
+  #endif
+#endif
+
 /* Mimic fgets behavior with PSPSDK functions
  * Returns the equivalent to: fgets(...) != NULL
- * Thx go to Freakler for his code: https://github.com/Freakler/CheatDeviceRemastered/blob/d537e30f6fb927cc873e5756c7a4afe07c267c93/source/minIni.c#L96
+ * Big thanks go to Freakler for his code: https://github.com/Freakler/CheatDeviceRemastered/blob/d537e30f6fb927cc873e5756c7a4afe07c267c93/source/minIni.c#L96
  */
 SceBool psp_read_fgets(char *s, SceSize n, INI_FILETYPE *stream)
 {
-  if ( n == 0 || s == NULL || stream == NULL ) return 0;
+  assert(n != 0 && s != NULL && stream != NULL);
 
   int bytes_read = sceIoRead(*stream, s, n - 1);
 
   /* If nothing was read or it errored out, fgets returns NULL */
-  if (bytes_read <= 0) return 0;
+  if ( bytes_read <= 0 ) return INI_FALSE;
 
   /* Read until newline (or until string end if newline isn't found) */
   int i = 0;
-  while(i < bytes_read)
+  while( i < bytes_read )
   {
     if( s[i++] == INI_LINETERMCHAR ) break;
   }
@@ -67,10 +91,10 @@ SceBool psp_read_fgets(char *s, SceSize n, INI_FILETYPE *stream)
   s[i] = '\0';
 
   /* If string goes beyond newline, seek back */
-  if (bytes_read > i)
+  if ( bytes_read > i )
     sceIoLseek32(*stream, -(bytes_read - i), PSP_SEEK_CUR);
 
-  return 1;
+  return INI_TRUE;
 }
 
 static char *skipleading(const char *str)
@@ -98,9 +122,9 @@ static char *striptrailing(char *str)
   return str;
 }
 
-static char *ini_strncpy(char *dest, const char *source, size_t maxlen, enum quote_option option)
+static char *ini_strncpy(char *dest, const char *source, SceSize maxlen, enum quote_option option)
 {
-  size_t d, s;
+  SceUInt d, s;
 
   assert(maxlen>0);
   assert(source != NULL && dest != NULL);
@@ -146,7 +170,7 @@ static char *ini_strncpy(char *dest, const char *source, size_t maxlen, enum quo
 
 static char *cleanstring(char *string, enum quote_option *quotes)
 {
-  int isstring;
+  SceBool isstring;
   char *ep;
 
   assert(string != NULL);
@@ -177,28 +201,29 @@ static char *cleanstring(char *string, enum quote_option *quotes)
   return string;
 }
 
-static SceBool getkeystring(INI_FILETYPE *fp, const char *Section, const char *Key,
-                        int idxSection, int idxKey, char *Buffer, int BufferSize,
+static SceBool getkeystring(INI_FILETYPE *fd, const char *Section, const char *Key,
+                        int idxSection, int idxKey, char *Buffer, SceSize BufferSize,
                         INI_FILEPOS *mark)
 {
   char *sp, *ep;
-  int len, idx;
+  SceSize len;
+  int idx;
   enum quote_option quotes;
   char LocalBuffer[INI_BUFFERSIZE];
 
-  assert(fp != NULL);
+  assert(fd != NULL);
   /* Move through file 1 line at a time until a section is matched or EOF. If
    * parameter Section is NULL, only look at keys above the first section. If
    * idxSection is positive, copy the relevant section name.
    */
-  len = (Section != NULL) ? (int)strlen(Section) : 0;
+  len = (Section != NULL) ? (SceSize)strlen(Section) : 0;
   if (len > 0 || idxSection >= 0) {
     assert(idxSection >= 0 || Section != NULL);
     idx = -1;
     do {
       do {
-        if (!ini_read(LocalBuffer, INI_BUFFERSIZE, fp))
-          return 0;
+        if (!ini_read(LocalBuffer, INI_BUFFERSIZE, fd))
+          return INI_FALSE;
         sp = skipleading(LocalBuffer);
         ep = strrchr(sp, ']');
       } while (*sp != '[' || ep == NULL);
@@ -209,15 +234,15 @@ static SceBool getkeystring(INI_FILETYPE *fp, const char *Section, const char *K
       sp = skipleading(sp + 1);
       assert(ep != NULL && *ep == ']');
       ep = skiptrailing(ep, sp);
-    } while ((((int)(ep-sp) != len || Section == NULL || strnicmp(sp, Section, len) != 0) && ++idx != idxSection));
+    } while ((((SceUInt)(ep-sp) != len || Section == NULL || strnicmp(sp, Section, len) != 0) && ++idx != idxSection));
     if (idxSection >= 0) {
       if (idx == idxSection) {
         assert(ep != NULL);
         *ep = '\0'; /* the end of the section name was found earlier */
         ini_strncpy(Buffer, sp, BufferSize, QUOTE_NONE);
-        return 1;
+        return INI_TRUE;
       }
-      return 0; /* no more section found */
+      return INI_FALSE; /* no more section found */
     }
   }
 
@@ -225,19 +250,19 @@ static SceBool getkeystring(INI_FILETYPE *fp, const char *Section, const char *K
    * Stop searching upon leaving the section's area.
    */
   assert(Key != NULL || idxKey >= 0);
-  len = (Key != NULL) ? (int)strlen(Key) : 0;
+  len = (Key != NULL) ? (SceSize)strlen(Key) : 0;
   idx = -1;
   do {
     if (mark != NULL)
-      (void)ini_tell(fp, mark);   /* optionally keep the mark to the start of the line */
-    if (!ini_read(LocalBuffer,INI_BUFFERSIZE,fp) || *(sp = skipleading(LocalBuffer)) == '[')
-      return 0;
+      (void)ini_tell(fd, mark);   /* optionally keep the mark to the start of the line */
+    if (!ini_read(LocalBuffer,INI_BUFFERSIZE,fd) || *(sp = skipleading(LocalBuffer)) == '[')
+      return INI_FALSE;
     sp = skipleading(LocalBuffer);
     ep = strchr(sp, '=');  /* Parse out the equal sign */
     if (ep == NULL)
       ep = strchr(sp, ':');
   } while (*sp == ';' || *sp == '#' || ep == NULL
-           || ((len == 0 || (int)(skiptrailing(ep,sp)-sp) != len || strnicmp(sp,Key,len) != 0) && ++idx != idxKey));
+           || ((len == 0 || (SceUInt)(skiptrailing(ep,sp)-sp) != len || strnicmp(sp,Key,len) != 0) && ++idx != idxKey));
   if (idxKey >= 0) {
     if (idx == idxKey) {
       assert(ep != NULL);
@@ -245,9 +270,9 @@ static SceBool getkeystring(INI_FILETYPE *fp, const char *Section, const char *K
       *ep = '\0';
       striptrailing(sp);
       ini_strncpy(Buffer, sp, BufferSize, QUOTE_NONE);
-      return 1;
+      return INI_TRUE;
     }
-    return 0;   /* no more key found (in this section) */
+    return INI_FALSE;  /* no more key found (in this section) */
   }
 
   /* Copy up to BufferSize chars to buffer */
@@ -256,7 +281,7 @@ static SceBool getkeystring(INI_FILETYPE *fp, const char *Section, const char *K
   sp = skipleading(ep + 1);
   sp = cleanstring(sp, &quotes);  /* Remove a trailing comment */
   ini_strncpy(Buffer, sp, BufferSize, quotes);
-  return 1;
+  return INI_TRUE;
 }
 
 /** ini_gets()
@@ -269,21 +294,21 @@ static SceBool getkeystring(INI_FILETYPE *fp, const char *Section, const char *K
  *
  * \return            the number of characters copied into the supplied buffer
  */
-SceInt32 ini_gets(const char *Section, const char *Key, const char *DefValue,
-             char *Buffer, int BufferSize, const char *Filename)
+SceSize ini_gets(const char *Section, const char *Key, const char *DefValue,
+             char *Buffer, SceSize BufferSize, const char *Filename)
 {
-  INI_FILETYPE fp;
-  int ok = 0;
+  INI_FILETYPE fd;
+  SceBool ok = INI_FALSE;
 
   if (Buffer == NULL || BufferSize <= 0 || Key == NULL)
-    return 0;
-  if (ini_openread(Filename, &fp)) {
-    ok = getkeystring(&fp, Section, Key, -1, -1, Buffer, BufferSize, NULL);
-    (void)ini_close(&fp);
+    return INI_FALSE;
+  if (ini_openread(Filename, &fd)) {
+    ok = getkeystring(&fd, Section, Key, -1, -1, Buffer, BufferSize, NULL);
+    (void)ini_close(&fd);
   }
   if (!ok)
     ini_strncpy(Buffer, (DefValue != NULL) ? DefValue : "", BufferSize, QUOTE_NONE);
-  return (int)strlen(Buffer);
+  return (SceSize)strlen(Buffer);
 }
 
 /** ini_geti()
@@ -294,13 +319,30 @@ SceInt32 ini_gets(const char *Section, const char *Key, const char *DefValue,
  *
  * \return            the value located at Key
  */
-SceInt32 ini_geti(const char *Section, const char *Key, SceInt32 DefValue, const char *Filename)
+int ini_geti(const char *Section, const char *Key, int DefValue, const char *Filename)
 {
-  char LocalBuffer[64];
-  int len = ini_gets(Section, Key, "", LocalBuffer, sizearray(LocalBuffer), Filename);
+  char LocalBuffer[16];
+  SceSize len = ini_gets(Section, Key, "", LocalBuffer, sizeof(LocalBuffer), Filename);
   return (len == 0) ? DefValue
                     : ((len >= 2 && (LocalBuffer[1] == 'x' || LocalBuffer[1] == 'X')) ? (int)strtol(LocalBuffer, NULL, 16)
                                                                            : (int)strtol(LocalBuffer, NULL, 10));
+}
+
+/** ini_getu()
+ * \param Section     the name of the section to search for
+ * \param Key         the name of the entry to find the value of
+ * \param DefValue    the default value in the event of a failed read
+ * \param Filename    the name of the .ini file to read from
+ *
+ * \return            the value located at Key
+ */
+SceUInt ini_getu(const char *Section, const char *Key, SceUInt DefValue, const char *Filename)
+{
+  char LocalBuffer[16];
+  SceSize len = ini_gets(Section, Key, "", LocalBuffer, sizeof(LocalBuffer), Filename);
+  return (len == 0) ? DefValue
+                    : ((len >= 2 && (LocalBuffer[1] == 'x' || LocalBuffer[1] == 'X')) ? (SceUInt)strtoul(LocalBuffer, NULL, 16)
+                                                                           : (SceUInt)strtoul(LocalBuffer, NULL, 10));
 }
 
 /** ini_getf()
@@ -311,10 +353,10 @@ SceInt32 ini_geti(const char *Section, const char *Key, SceInt32 DefValue, const
  *
  * \return            the value located at Key
  */
-SceFloat ini_getf(const char *Section, const char *Key, SceFloat DefValue, const char *Filename)
+float ini_getf(const char *Section, const char *Key, float DefValue, const char *Filename)
 {
   char LocalBuffer[64];
-  int len = ini_gets(Section, Key, "", LocalBuffer, sizearray(LocalBuffer), Filename);
+  SceSize len = ini_gets(Section, Key, "", LocalBuffer, sizeof(LocalBuffer), Filename);
   return (len == 0) ? DefValue : ini_atof(LocalBuffer);
 }
 
@@ -340,9 +382,9 @@ SceFloat ini_getf(const char *Section, const char *Key, SceFloat DefValue, const
 SceBool ini_getbool(const char *Section, const char *Key, SceBool DefValue, const char *Filename)
 {
   char LocalBuffer[2] = "";
-  int ret;
+  SceBool ret;
 
-  ini_gets(Section, Key, "", LocalBuffer, sizearray(LocalBuffer), Filename);
+  ini_gets(Section, Key, "", LocalBuffer, sizeof(LocalBuffer), Filename);
   if (LocalBuffer[0] == 'Y' || LocalBuffer[0] == 'y' || LocalBuffer[0] == '1' || LocalBuffer[0] == 'T' || LocalBuffer[0] == 't')
     ret = 1;
   else if (LocalBuffer[0] == 'N' ||LocalBuffer[0] == 'n' || LocalBuffer[0] == '0' || LocalBuffer[0] == 'F' || LocalBuffer[0] == 'f')
@@ -361,20 +403,20 @@ SceBool ini_getbool(const char *Section, const char *Key, SceBool DefValue, cons
  *
  * \return            the number of characters copied into the supplied buffer
  */
-SceInt32  ini_getsection(int idx, char *Buffer, int BufferSize, const char *Filename)
+SceSize ini_getsection(int idx, char *Buffer, SceSize BufferSize, const char *Filename)
 {
-  INI_FILETYPE fp;
-  int ok = 0;
+  INI_FILETYPE fd;
+  SceBool ok = INI_FALSE;
 
   if (Buffer == NULL || BufferSize <= 0 || idx < 0)
-    return 0;
-  if (ini_openread(Filename, &fp)) {
-    ok = getkeystring(&fp, NULL, NULL, idx, -1, Buffer, BufferSize, NULL);
-    (void)ini_close(&fp);
+    return INI_FALSE;
+  if (ini_openread(Filename, &fd)) {
+    ok = getkeystring(&fd, NULL, NULL, idx, -1, Buffer, BufferSize, NULL);
+    (void)ini_close(&fd);
   }
   if (!ok)
     *Buffer = '\0';
-  return (int)strlen(Buffer);
+  return (SceSize)strlen(Buffer);
 }
 
 /** ini_getkey()
@@ -387,20 +429,20 @@ SceInt32  ini_getsection(int idx, char *Buffer, int BufferSize, const char *File
  *
  * \return            the number of characters copied into the supplied buffer
  */
-SceInt32  ini_getkey(const char *Section, int idx, char *Buffer, int BufferSize, const char *Filename)
+SceSize ini_getkey(const char *Section, int idx, char *Buffer, SceSize BufferSize, const char *Filename)
 {
-  INI_FILETYPE fp;
-  int ok = 0;
+  INI_FILETYPE fd;
+  SceBool ok = INI_FALSE;
 
   if (Buffer == NULL || BufferSize <= 0 || idx < 0)
-    return 0;
-  if (ini_openread(Filename, &fp)) {
-    ok = getkeystring(&fp, Section, NULL, -1, idx, Buffer, BufferSize, NULL);
-    (void)ini_close(&fp);
+    return INI_FALSE;
+  if (ini_openread(Filename, &fd)) {
+    ok = getkeystring(&fd, Section, NULL, -1, idx, Buffer, BufferSize, NULL);
+    (void)ini_close(&fd);
   }
   if (!ok)
     *Buffer = '\0';
-  return (int)strlen(Buffer);
+  return (SceSize)strlen(Buffer);
 }
 
 /** ini_hassection()
@@ -411,13 +453,13 @@ SceInt32  ini_getkey(const char *Section, int idx, char *Buffer, int BufferSize,
  */
 SceBool ini_hassection(const char *Section, const char *Filename)
 {
-  char LocalBuffer[32];  /* dummy buffer */
-  INI_FILETYPE fp;
-  int ok = 0;
+  char LocalBuffer[8];  /* dummy buffer */
+  INI_FILETYPE fd;
+  SceBool ok = INI_FALSE;
 
-  if (ini_openread(Filename, &fp)) {
-    ok = getkeystring(&fp, Section, NULL, -1, 0, LocalBuffer, sizearray(LocalBuffer), NULL);
-    (void)ini_close(&fp);
+  if (ini_openread(Filename, &fd)) {
+    ok = getkeystring(&fd, Section, NULL, -1, 0, LocalBuffer, sizeof(LocalBuffer), NULL);
+    (void)ini_close(&fd);
   }
   return ok;
 }
@@ -431,19 +473,19 @@ SceBool ini_hassection(const char *Section, const char *Filename)
  */
 SceBool ini_haskey(const char *Section, const char *Key, const char *Filename)
 {
-  char LocalBuffer[32];  /* dummy buffer */
-  INI_FILETYPE fp;
-  SceBool ok = 0;
+  char LocalBuffer[8];  /* dummy buffer */
+  INI_FILETYPE fd;
+  SceBool ok = INI_FALSE;
 
-  if (ini_openread(Filename, &fp)) {
-    ok = getkeystring(&fp, Section, Key, -1, -1, LocalBuffer, sizearray(LocalBuffer), NULL);
-    (void)ini_close(&fp);
+  if (ini_openread(Filename, &fd)) {
+    ok = getkeystring(&fd, Section, Key, -1, -1, LocalBuffer, sizeof(LocalBuffer), NULL);
+    (void)ini_close(&fd);
   }
   return ok;
 }
 
 
-#if !defined INI_NOBROWSE
+#if INI_BROWSE
 /** ini_browse()
  * \param Callback    a pointer to a function that will be called for every
  *                    setting in the INI file.
@@ -461,20 +503,20 @@ SceBool ini_haskey(const char *Section, const char *Key, const char *Filename)
 SceBool ini_browse(INI_CALLBACK Callback, void *UserData, const char *Filename)
 {
   char LocalBuffer[INI_BUFFERSIZE];
-  int lenSec, lenKey;
+  SceSize lenSec, lenKey;
   enum quote_option quotes;
-  INI_FILETYPE fp;
+  INI_FILETYPE fd;
 
   if (Callback == NULL)
-    return 0;
-  if (!ini_openread(Filename, &fp))
-    return 0;
+    return INI_FALSE;
+  if (!ini_openread(Filename, &fd))
+    return INI_FALSE;
 
   LocalBuffer[0] = '\0';   /* copy an empty section in the buffer */
-  lenSec = (int)strlen(LocalBuffer) + 1;
+  lenSec = (SceSize)strlen(LocalBuffer) + 1;
   for ( ;; ) {
     char *sp, *ep;
-    if (!ini_read(LocalBuffer + lenSec, INI_BUFFERSIZE - lenSec, &fp))
+    if (!ini_read(LocalBuffer + lenSec, INI_BUFFERSIZE - lenSec, &fd))
       break;
     sp = skipleading(LocalBuffer + lenSec);
     /* ignore empty strings and comments */
@@ -487,7 +529,7 @@ SceBool ini_browse(INI_CALLBACK Callback, void *UserData, const char *Filename)
       ep = skiptrailing(ep, sp);
       *ep = '\0';
       ini_strncpy(LocalBuffer, sp, INI_BUFFERSIZE, QUOTE_NONE);
-      lenSec = (int)strlen(LocalBuffer) + 1;
+      lenSec = (SceSize)strlen(LocalBuffer) + 1;
       continue;
     }
     /* not a new section, test for a key/value pair */
@@ -499,7 +541,7 @@ SceBool ini_browse(INI_CALLBACK Callback, void *UserData, const char *Filename)
     *ep++ = '\0';             /* split the key from the value */
     striptrailing(sp);
     ini_strncpy(LocalBuffer + lenSec, sp, INI_BUFFERSIZE - lenSec, QUOTE_NONE);
-    lenKey = (int)strlen(LocalBuffer + lenSec) + 1;
+    lenKey = (SceSize)strlen(LocalBuffer + lenSec) + 1;
     /* clean up the value */
     sp = skipleading(ep);
     sp = cleanstring(sp, &quotes);  /* Remove a trailing comment */
@@ -509,13 +551,13 @@ SceBool ini_browse(INI_CALLBACK Callback, void *UserData, const char *Filename)
       break;
   }
 
-  (void)ini_close(&fp);
-  return 1;
+  (void)ini_close(&fd);
+  return INI_TRUE;
 }
-#endif /* INI_NOBROWSE */
+#endif /* INI_BROWSE */
 
-#if ! defined INI_READONLY
-static void ini_tempname(char *dest, const char *source, int maxlength)
+#if !INI_READONLY
+static void ini_tempname(char *dest, const char *source, SceSize maxlength)
 {
   char *p;
 
@@ -538,7 +580,7 @@ static enum quote_option check_enquote(const char *Value)
   return (*p != '\0' || (p > Value && *(p - 1) == ' ')) ? QUOTE_ENQUOTE : QUOTE_NONE;
 }
 
-static void writesection(char *LocalBuffer, SceSize BufferSize, const char *Section, INI_FILETYPE *fp)
+static void writesection(char *LocalBuffer, const char *Section, INI_FILETYPE *fd)
 {
   if (Section != NULL && strlen(Section) > 0) {
     char *p;
@@ -548,50 +590,51 @@ static void writesection(char *LocalBuffer, SceSize BufferSize, const char *Sect
     assert(p != NULL);
     *p++ = ']';
     strcpy(p, INI_LINETERM); /* copy line terminator (typically "\n") */
-    if (fp != NULL)
-      (void)ini_write(LocalBuffer, strlen(LocalBuffer), fp);
+    if (fd != NULL)
+      (void)ini_write(LocalBuffer, strlen(LocalBuffer), fd);
   }
 }
 
-static void writekey(char *LocalBuffer, const char *Key, const char *Value, INI_FILETYPE *fp)
+static void writekey(char *LocalBuffer, const char *Key, const char *Value, INI_FILETYPE *fd)
 {
   char *p;
   enum quote_option option = check_enquote(Value);
-  ini_strncpy(LocalBuffer, Key, INI_BUFFERSIZE - 2, QUOTE_NONE);  /* -1 for '=', -1 for '\n' */
+  ini_strncpy(LocalBuffer, Key, INI_BUFFERSIZE - 4, QUOTE_NONE);  /* -2 for formatting, -1 for '=', -1 for '\n' */
   p = strchr(LocalBuffer, '\0');
   assert(p != NULL);
-  *p++ = '=';
+  /* Put spaces before and after the equal sign (for formatting) */
+  *p++ = ' '; *p++ = '='; *p++ = ' ';
   ini_strncpy(p, Value, INI_BUFFERSIZE - (p - LocalBuffer) - 1, option); /* -1 for '\n' */
   p = strchr(LocalBuffer, '\0');
   assert(p != NULL);
   strcpy(p, INI_LINETERM); /* copy line terminator (typically "\n") */
-  if (fp != NULL)
-    (void)ini_write(LocalBuffer, strlen(LocalBuffer), fp);
+  if (fd != NULL)
+    (void)ini_write(LocalBuffer, strlen(LocalBuffer), fd);
 }
 
-static int cache_accum(const char *string, int *size, int max)
+static SceBool cache_accum(const char *string, SceSize *size, SceUInt max)
 {
-  int len = (int)strlen(string);
+  SceSize len = (SceSize)strlen(string);
   if (*size + len >= max)
-    return 0;
+    return INI_FALSE;
   *size += len;
-  return 1;
+  return INI_TRUE;
 }
 
-static int cache_flush(char *buffer, int *size,
-                      INI_FILETYPE *rfp, INI_FILETYPE *wfp, INI_FILEPOS *mark)
+static SceBool cache_flush(char *buffer, SceSize *size,
+                      INI_FILETYPE *rfd, INI_FILETYPE *wfd, INI_FILEPOS *mark)
 {
-  int terminator_len = (int)strlen(INI_LINETERM);
-  int pos = 0, pos_prev = -1;
+  SceSize terminator_len = (SceSize)strlen(INI_LINETERM);
+  SceUInt pos = 0, pos_prev = -1;
 
-  (void)ini_seek(rfp, mark);
+  (void)ini_seek(rfd, mark);
   assert(buffer != NULL);
   buffer[0] = '\0';
   assert(size != NULL);
   assert(*size <= INI_BUFFERSIZE);
   while (pos < *size && pos != pos_prev) {
     pos_prev = pos;     /* to guard against zero bytes in the INI file */
-    (void)ini_read(buffer + pos, INI_BUFFERSIZE - pos, rfp);
+    (void)ini_read(buffer + pos, INI_BUFFERSIZE - pos, rfd);
     while (pos < *size && buffer[pos] != '\0')
       pos++;            /* cannot use strlen() because buffer may not be zero-terminated */
   }
@@ -600,24 +643,22 @@ static int cache_flush(char *buffer, int *size,
     if (pos == INI_BUFFERSIZE)
       pos--;
     buffer[pos] = '\0'; /* force zero-termination (may be left unterminated in the above while loop) */
-    (void)ini_write(buffer, *size, wfp);
+    (void)ini_write(buffer, *size, wfd);
   }
-  (void)ini_tell(rfp, mark);  /* update mark */
+  (void)ini_tell(rfd, mark);  /* update mark */
   *size = 0;
   /* return whether the buffer ended with a line termination */
   return (pos > terminator_len) && (strcmp(buffer + pos - terminator_len, INI_LINETERM) == 0);
 }
 
-static int close_rename(INI_FILETYPE *rfp, INI_FILETYPE *wfp, const char *filename, char *buffer)
+static SceBool close_rename(INI_FILETYPE *rfd, INI_FILETYPE *wfd, const char *filename, char *buffer)
 {
-  (void)ini_close(rfp);
-  (void)ini_close(wfp);
+  (void)ini_close(rfd);
+  (void)ini_close(wfd);
   (void)ini_tempname(buffer, filename, INI_BUFFERSIZE);
-  #if defined ini_remove || defined INI_REMOVE
-    (void)ini_remove(filename);
-  #endif
+  (void)ini_remove(filename);
   (void)ini_rename(buffer, filename);
-  return 1;
+  return INI_TRUE;
 }
 
 /** ini_puts()
@@ -630,25 +671,26 @@ static int close_rename(INI_FILETYPE *rfp, INI_FILETYPE *wfp, const char *filena
  */
 SceBool ini_puts(const char *Section, const char *Key, const char *Value, const char *Filename)
 {
-  INI_FILETYPE rfp;
-  INI_FILETYPE wfp;
+  INI_FILETYPE rfd;
+  INI_FILETYPE wfd;
   INI_FILEPOS mark;
   INI_FILEPOS head, tail;
   char *sp, *ep;
   char LocalBuffer[INI_BUFFERSIZE];
-  int len, match, flag, cachelen;
+  SceSize len, cachelen;
+  SceBool match, flag;
 
   assert(Filename != NULL);
-  if (!ini_openread(Filename, &rfp)) {
+  if (!ini_openread(Filename, &rfd)) {
     /* If the .ini file doesn't exist, make a new file */
     if (Key != NULL && Value != NULL) {
-      if (!ini_openwrite(Filename, &wfp))
-        return 0;
-      writesection(LocalBuffer, INI_BUFFERSIZE, Section, &wfp);
-      writekey(LocalBuffer, Key, Value, &wfp);
-      (void)ini_close(&wfp);
+      if (!ini_openwrite(Filename, &wfd))
+        return INI_FALSE;
+      writesection(LocalBuffer, Section, &wfd);
+      writekey(LocalBuffer, Key, Value, &wfd);
+      (void)ini_close(&wfd);
     }
-    return 1;
+    return INI_TRUE;
   }
 
   /* If parameters Key and Value are valid (so this is not an "erase" request)
@@ -656,45 +698,44 @@ SceBool ini_puts(const char *Section, const char *Key, const char *Value, const 
    * the INI file.
    */
   if (Key != NULL && Value != NULL) {
-    match = getkeystring(&rfp, Section, Key, -1, -1, LocalBuffer, sizearray(LocalBuffer), &head);
+    match = getkeystring(&rfd, Section, Key, -1, -1, LocalBuffer, sizeof(LocalBuffer), &head);
     if (match) {
       /* if the current setting is identical to the one to write, there is
        * nothing to do.
        */
       if (strcmp(LocalBuffer,Value) == 0) {
-        (void)ini_close(&rfp);
-        return 1;
+        (void)ini_close(&rfd);
+        return INI_TRUE;
       }
       /* if the new setting has the same length as the current setting, and the
        * glue file permits file read/write access, we can modify in place.
        */
-      #if defined ini_openrewrite || defined INI_OPENREWRITE
-        /* we already have the start of the (raw) line, get the end too */
-        (void)ini_tell(&rfp, &tail);
-        /* create new buffer (without writing it to file) */
-        writekey(LocalBuffer, Key, Value, NULL);
-        if (strlen(LocalBuffer) == (size_t)(tail - head)) {
-          /* length matches, close the file & re-open for read/write, then
-           * write at the correct position
-           */
-          (void)ini_close(&rfp);
-          if (!ini_openrewrite(Filename, &wfp))
-            return 0;
-          (void)ini_seek(&wfp, &head);
-          (void)ini_write(LocalBuffer, strlen(LocalBuffer), &wfp);
-          (void)ini_close(&wfp);
-          return 1;
-        }
-      #endif
+      /* we already have the start of the (raw) line, get the end too */
+      (void)ini_tell(&rfd, &tail);
+      /* create new buffer (without writing it to file) */
+      writekey(LocalBuffer, Key, Value, NULL);
+      
+      if (strlen(LocalBuffer) == (SceSize)(tail - head)) {
+        /* length matches, close the file & re-open for read/write, then
+         * write at the correct position
+         */
+        (void)ini_close(&rfd);
+        if (!ini_openrewrite(Filename, &wfd))
+          return INI_FALSE;
+        (void)ini_seek(&wfd, &head);
+        (void)ini_write(LocalBuffer, strlen(LocalBuffer), &wfd);
+        (void)ini_close(&wfd);
+        return INI_TRUE;
+      }
     }
     /* key not found, or different value & length -> proceed */
   } else if (Key != NULL && Value == NULL) {
     /* Conversely, for a request to delete a setting; if that setting isn't
        present, just return */
-    match = getkeystring(&rfp, Section, Key, -1, -1, LocalBuffer, sizearray(LocalBuffer), NULL);
+    match = getkeystring(&rfd, Section, Key, -1, -1, LocalBuffer, sizeof(LocalBuffer), NULL);
     if (!match) {
-      (void)ini_close(&rfp);
-      return 1;
+      (void)ini_close(&rfd);
+      return INI_TRUE;
     }
     /* key found -> proceed to delete it */
   }
@@ -702,41 +743,41 @@ SceBool ini_puts(const char *Section, const char *Key, const char *Value, const 
   /* Get a temporary file name to copy to. Use the existing name, but with
    * the last character set to a '~'.
    */
-  (void)ini_close(&rfp);
+  (void)ini_close(&rfd);
   ini_tempname(LocalBuffer, Filename, INI_BUFFERSIZE);
-  if (!ini_openwrite(LocalBuffer, &wfp))
-    return 0;
+  if (!ini_openwrite(LocalBuffer, &wfd))
+    return INI_FALSE;
   /* In the case of (advisory) file locks, ini_openwrite() may have been blocked
    * on the open, and after the block is lifted, the original file may have been
    * renamed, which is why the original file was closed and is now reopened */
-  if (!ini_openread(Filename, &rfp)) {
+  if (!ini_openread(Filename, &rfd)) {
     /* If the .ini file doesn't exist any more, make a new file */
     assert(Key != NULL && Value != NULL);
-    writesection(LocalBuffer, INI_BUFFERSIZE, Section, &wfp);
-    writekey(LocalBuffer, Key, Value, &wfp);
-    (void)ini_close(&wfp);
-    return 1;
+    writesection(LocalBuffer, Section, &wfd);
+    writekey(LocalBuffer, Key, Value, &wfd);
+    (void)ini_close(&wfd);
+    return INI_TRUE;
   }
 
-  (void)ini_tell(&rfp, &mark);
+  (void)ini_tell(&rfd, &mark);
   cachelen = 0;
 
   /* Move through the file one line at a time until a section is
    * matched or until EOF. Copy to temp file as it is read.
    */
-  len = (Section != NULL) ? (int)strlen(Section) : 0;
+  len = (Section != NULL) ? (SceSize)strlen(Section) : 0;
   if (len > 0) {
     do {
-      if (!ini_read(LocalBuffer, INI_BUFFERSIZE, &rfp)) {
+      if (!ini_read(LocalBuffer, INI_BUFFERSIZE, &rfd)) {
         /* Failed to find section, so add one to the end */
-        flag = cache_flush(LocalBuffer, &cachelen, &rfp, &wfp, &mark);
+        flag = cache_flush(LocalBuffer, &cachelen, &rfd, &wfd, &mark);
         if (Key!=NULL && Value!=NULL) {
           if (!flag)
-            (void)ini_write(INI_LINETERM, 1, &wfp);  /* force a new line behind the last line of the INI file */
-          writesection(LocalBuffer, INI_BUFFERSIZE, Section, &wfp);
-          writekey(LocalBuffer, Key, Value, &wfp);
+            (void)ini_write(INI_LINETERM, 1, &wfd);  /* force a new line behind the last line of the INI file */
+          writesection(LocalBuffer, Section, &wfd);
+          writekey(LocalBuffer, Key, Value, &wfd);
         }
-        return close_rename(&rfp, &wfp, Filename, LocalBuffer);  /* clean up and rename */
+        return close_rename(&rfd, &wfd, Filename, LocalBuffer);  /* clean up and rename */
       }
       /* Check whether this line is a section */
       sp = skipleading(LocalBuffer);
@@ -748,61 +789,61 @@ SceBool ini_puts(const char *Section, const char *Key, const char *Value, const 
         sp = skipleading(sp + 1);
         assert(ep != NULL && *ep == ']');
         ep = skiptrailing(ep, sp);
-        match = ((int)(ep-sp) == len && strnicmp(sp, Section, len) == 0);
+        match = ((SceUInt)(ep-sp) == len && strnicmp(sp, Section, len) == 0);
       }
       /* Copy the line from source to dest, but not if this is the section that
        * we are looking for and this section must be removed
        */
       if (!match || Key != NULL) {
         if (!cache_accum(LocalBuffer, &cachelen, INI_BUFFERSIZE)) {
-          cache_flush(LocalBuffer, &cachelen, &rfp, &wfp, &mark);
-          (void)ini_read(LocalBuffer, INI_BUFFERSIZE, &rfp);
+          cache_flush(LocalBuffer, &cachelen, &rfd, &wfd, &mark);
+          (void)ini_read(LocalBuffer, INI_BUFFERSIZE, &rfd);
           cache_accum(LocalBuffer, &cachelen, INI_BUFFERSIZE);
         }
       }
     } while (!match);
   }
-  cache_flush(LocalBuffer, &cachelen, &rfp, &wfp, &mark);
+  cache_flush(LocalBuffer, &cachelen, &rfd, &wfd, &mark);
   /* when deleting a section, the section head that was just found has not been
    * copied to the output file, but because this line was not "accumulated" in
    * the cache, the position in the input file was reset to the point just
    * before the section; this must now be skipped (again)
    */
   if (Key == NULL) {
-    (void)ini_read(LocalBuffer, INI_BUFFERSIZE, &rfp);
-    (void)ini_tell(&rfp, &mark);
+    (void)ini_read(LocalBuffer, INI_BUFFERSIZE, &rfd);
+    (void)ini_tell(&rfd, &mark);
   }
 
   /* Now that the section has been found, find the entry. Stop searching
    * upon leaving the section's area. Copy the file as it is read
    * and create an entry if one is not found.
    */
-  len = (Key != NULL) ? (int)strlen(Key) : 0;
+  len = (Key != NULL) ? (SceSize)strlen(Key) : 0;
   for( ;; ) {
-    if (!ini_read(LocalBuffer, INI_BUFFERSIZE, &rfp)) {
+    if (!ini_read(LocalBuffer, INI_BUFFERSIZE, &rfd)) {
       /* EOF without an entry so make one */
-      flag = cache_flush(LocalBuffer, &cachelen, &rfp, &wfp, &mark);
+      flag = cache_flush(LocalBuffer, &cachelen, &rfd, &wfd, &mark);
       if (Key!=NULL && Value!=NULL) {
         if (!flag)
-          (void)ini_write(INI_LINETERM, 1, &wfp);  /* force a new line behind the last line of the INI file */
-        writekey(LocalBuffer, Key, Value, &wfp);
+          (void)ini_write(INI_LINETERM, 1, &wfd);  /* force a new line behind the last line of the INI file */
+        writekey(LocalBuffer, Key, Value, &wfd);
       }
-      return close_rename(&rfp, &wfp, Filename, LocalBuffer);  /* clean up and rename */
+      return close_rename(&rfd, &wfd, Filename, LocalBuffer);  /* clean up and rename */
     }
     sp = skipleading(LocalBuffer);
     ep = strchr(sp, '='); /* Parse out the equal sign */
     if (ep == NULL)
       ep = strchr(sp, ':');
-    match = (ep != NULL && len > 0 && (int)(skiptrailing(ep,sp)-sp) == len && strnicmp(sp,Key,len) == 0);
+    match = (ep != NULL && len > 0 && (SceUInt)(skiptrailing(ep,sp)-sp) == len && strnicmp(sp,Key,len) == 0);
     if ((Key != NULL && match) || *sp == '[')
       break;  /* found the key, or found a new section */
     /* copy other keys in the section */
     if (Key == NULL) {
-      (void)ini_tell(&rfp, &mark);  /* we are deleting the entire section, so update the read position */
+      (void)ini_tell(&rfd, &mark);  /* we are deleting the entire section, so update the read position */
     } else {
       if (!cache_accum(LocalBuffer, &cachelen, INI_BUFFERSIZE)) {
-        cache_flush(LocalBuffer, &cachelen, &rfp, &wfp, &mark);
-        (void)ini_read(LocalBuffer, INI_BUFFERSIZE, &rfp);
+        cache_flush(LocalBuffer, &cachelen, &rfd, &wfd, &mark);
+        (void)ini_read(LocalBuffer, INI_BUFFERSIZE, &rfd);
         cache_accum(LocalBuffer, &cachelen, INI_BUFFERSIZE);
       }
     }
@@ -813,31 +854,31 @@ SceBool ini_puts(const char *Section, const char *Key, const char *Value, const 
    * the key
    */
   flag = (*sp == '[');
-  cache_flush(LocalBuffer, &cachelen, &rfp, &wfp, &mark);
+  cache_flush(LocalBuffer, &cachelen, &rfd, &wfd, &mark);
   if (Key != NULL && Value != NULL)
-    writekey(LocalBuffer, Key, Value, &wfp);
+    writekey(LocalBuffer, Key, Value, &wfd);
   /* cache_flush() reset the "read pointer" to the start of the line with the
    * previous key or the new section; read it again (because writekey() destroyed
    * the buffer)
    */
-  (void)ini_read(LocalBuffer, INI_BUFFERSIZE, &rfp);
+  (void)ini_read(LocalBuffer, INI_BUFFERSIZE, &rfd);
   if (flag) {
     /* the new section heading needs to be copied to the output file */
     cache_accum(LocalBuffer, &cachelen, INI_BUFFERSIZE);
   } else {
     /* forget the old key line */
-    (void)ini_tell(&rfp, &mark);
+    (void)ini_tell(&rfd, &mark);
   }
   /* Copy the rest of the INI file */
-  while (ini_read(LocalBuffer, INI_BUFFERSIZE, &rfp)) {
+  while (ini_read(LocalBuffer, INI_BUFFERSIZE, &rfd)) {
     if (!cache_accum(LocalBuffer, &cachelen, INI_BUFFERSIZE)) {
-      cache_flush(LocalBuffer, &cachelen, &rfp, &wfp, &mark);
-      (void)ini_read(LocalBuffer, INI_BUFFERSIZE, &rfp);
+      cache_flush(LocalBuffer, &cachelen, &rfd, &wfd, &mark);
+      (void)ini_read(LocalBuffer, INI_BUFFERSIZE, &rfd);
       cache_accum(LocalBuffer, &cachelen, INI_BUFFERSIZE);
     }
   }
-  cache_flush(LocalBuffer, &cachelen, &rfp, &wfp, &mark);
-  return close_rename(&rfp, &wfp, Filename, LocalBuffer);  /* clean up and rename */
+  cache_flush(LocalBuffer, &cachelen, &rfd, &wfd, &mark);
+  return close_rename(&rfd, &wfd, Filename, LocalBuffer);  /* clean up and rename */
 }
 
 /** ini_puti()
@@ -848,10 +889,25 @@ SceBool ini_puts(const char *Section, const char *Key, const char *Value, const 
  *
  * \return            1 if successful, otherwise 0
  */
-SceBool ini_puti(const char *Section, const char *Key, SceInt32 Value, const char *Filename)
+SceBool ini_puti(const char *Section, const char *Key, int Value, const char *Filename)
 {
-  char LocalBuffer[32];
+  char LocalBuffer[16];
   ini_itoa(LocalBuffer, sizeof(LocalBuffer), Value);
+  return ini_puts(Section, Key, LocalBuffer, Filename);
+}
+
+/** ini_putu()
+ * \param Section     the name of the section to write the value in
+ * \param Key         the name of the entry to write
+ * \param Value       the value to write
+ * \param Filename    the name and full path of the .ini file to write to
+ *
+ * \return            1 if successful, otherwise 0
+ */
+SceBool ini_putu(const char *Section, const char *Key, SceUInt Value, const char *Filename)
+{
+  char LocalBuffer[16];
+  ini_utoa(LocalBuffer, sizeof(LocalBuffer), Value);
   return ini_puts(Section, Key, LocalBuffer, Filename);
 }
 
@@ -863,7 +919,7 @@ SceBool ini_puti(const char *Section, const char *Key, SceInt32 Value, const cha
  *
  * \return            1 if successful, otherwise 0
  */
-SceBool ini_putf(const char *Section, const char *Key, SceFloat Value, const char *Filename)
+SceBool ini_putf(const char *Section, const char *Key, float Value, const char *Filename)
 {
   char LocalBuffer[64];
   ini_ftoa(LocalBuffer, sizeof(LocalBuffer), Value);

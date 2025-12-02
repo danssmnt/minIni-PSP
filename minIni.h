@@ -1,5 +1,5 @@
 /*  minIni - Multi-Platform INI file parser, suitable for embedded systems
- *  Optimized for the PlayStation: Portable
+ *  pspIni - A optimized fork for the PlayStation: Portable
  *
  *  Copyright (c) CompuPhase, 2008-2024
  *  Copyright (c) danssmnt,   2025
@@ -21,50 +21,60 @@
 #ifndef MININI_H
 #define MININI_H
 
-/* Make it Read-Only if needed */
-/* #define INI_READONLY */
-
-/* No Browser */
-/* #define INI_NOBROWSE */
-
 #include <psptypes.h>
 #include <string.h>
-#include "minGlue.h"
 
-#if !defined INI_BUFFERSIZE
+#define INI_FALSE 0
+#define INI_TRUE  1
+
+/* Read-Only */
+#ifndef INI_READONLY
+  #define INI_READONLY  INI_FALSE
+#endif
+
+/* INI Browser function */
+#ifndef INI_BROWSE
+  #define INI_BROWSE    INI_TRUE
+#endif
+
+/* INI Debug (for asserts). Only use when debugging this library! */
+#ifndef INI_DEBUG
+  #define INI_DEBUG     INI_FALSE
+#endif
+
+/* Default BufferSize for LocalBuffers */
+#ifndef INI_BUFFERSIZE
   #define INI_BUFFERSIZE  512
 #endif
 
-/* force INI_LINETERM to be '\n' */
-#if !defined INI_LINETERM
-  #define INI_LINETERM                  "\n"
-  #define INI_LINETERMCHAR              '\n'
+/* Default Newline */
+#ifndef INI_LINETERM
+  #define INI_LINETERM      "\n"
+  #define INI_LINETERMCHAR  '\n'
 #endif
 
-#if !defined strnicmp
-  #define strnicmp strncasecmp
-#endif
-
+int       ini_geti(const char *Section, const char *Key, int DefValue, const char *Filename);
+SceUInt   ini_getu(const char *Section, const char *Key, SceUInt DefValue, const char *Filename);
 SceBool   ini_getbool(const char *Section, const char *Key, SceBool DefValue, const char *Filename);
-SceInt32  ini_geti(const char *Section, const char *Key, SceInt32 DefValue, const char *Filename);
-SceInt32  ini_gets(const char *Section, const char *Key, const char *DefValue, char *Buffer, int BufferSize, const char *Filename);
-SceInt32  ini_getsection(int idx, char *Buffer, int BufferSize, const char *Filename);
-SceInt32  ini_getkey(const char *Section, int idx, char *Buffer, int BufferSize, const char *Filename);
-SceFloat  ini_getf(const char *Section, const char *Key, SceFloat DefValue, const char *Filename);
+float     ini_getf(const char *Section, const char *Key, float DefValue, const char *Filename);
+SceSize   ini_gets(const char *Section, const char *Key, const char *DefValue, char *Buffer, SceSize BufferSize, const char *Filename);
+SceSize   ini_getsection(int idx, char *Buffer, SceSize BufferSize, const char *Filename);
+SceSize   ini_getkey(const char *Section, int idx, char *Buffer, SceSize BufferSize, const char *Filename);
 
 SceBool   ini_hassection(const char *Section, const char *Filename);
 SceBool   ini_haskey(const char *Section, const char *Key, const char *Filename);
 
-#if !defined INI_READONLY
-SceBool  ini_putbool(const char *Section, const char *Key, SceBool Value, const char *Filename);
-SceBool  ini_puti(const char *Section, const char *Key, SceInt32 Value, const char *Filename);
-SceBool  ini_puts(const char *Section, const char *Key, const char *Value, const char *Filename);
-SceBool  ini_putf(const char *Section, const char *Key, SceFloat Value, const char *Filename);
+#if !INI_READONLY
+SceBool   ini_puti(const char *Section, const char *Key, int Value, const char *Filename);
+SceBool   ini_putu(const char *Section, const char *Key, SceUInt Value, const char *Filename);
+SceBool   ini_putbool(const char *Section, const char *Key, SceBool Value, const char *Filename);
+SceBool   ini_putf(const char *Section, const char *Key, float Value, const char *Filename);
+SceBool   ini_puts(const char *Section, const char *Key, const char *Value, const char *Filename);
 #endif /* INI_READONLY */
 
-#if !defined INI_NOBROWSE
+#if INI_BROWSE
 typedef SceBool (*INI_CALLBACK)(const char *Section, const char *Key, const char *Value, void *UserData);
-SceBool  ini_browse(INI_CALLBACK Callback, void *UserData, const char *Filename);
-#endif /* INI_NOBROWSE */
+SceBool   ini_browse(INI_CALLBACK Callback, void *UserData, const char *Filename);
+#endif /* INI_BROWSE */
 
 #endif /* MININI_H */

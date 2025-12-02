@@ -1,15 +1,14 @@
-# minIni PSP 
-This is a fork of the project developed more specifically for the PlayStation: Portable.
+# pspIni
+This is a fork of [minIni](https://github.com/compuphase/minIni) by _[@compuphase](https://github.com/compuphase)_ developed more specifically for the _PlayStation: Portable_.
+
 It doesn't change much of the original, just removes some unnecessary features and retypes / converts functions.
 
-It's intended for anyone who wants a quick and lite way to parse ``.ini`` files with PSPSDK without having to manually write the PSP ``minGlue.h`` and all that boring stuff.
+This fork is intended for anyone who wants a light, quick and easy way to parse ``.ini`` files with PSPSDK without having to manually write the PSP ``minGlue.h`` and all that boring stuff.
 
-Should work with all PSPSDKs (working with latest too).
-
-Checkout the [original repository](https://github.com/compuphase/minIni) by _[@compuphase](https://github.com/compuphase)_.
+Should work with all PSPSDKs, with ``USE_PSPSDK_LIBC = 1`` and all warning flags enabled (even ``-Wpedantic``!).
 
 ## Limitations
- - Doesn't support wide chars (and never will, wide chars suck)
+ - Doesn't support wide chars (not planned for implementation)
 
 
 ## Extremely Basic Sample Code
@@ -30,7 +29,7 @@ Favorite Number = 93
 #include <pspdisplay.h>
 
 #include "callbacks.h"
-#include "minIni-PSP/minIni.h"
+#include "pspIni/minIni.h"
 
 PSP_MODULE_INFO("Reading INIs", 0, 1, 0);
 PSP_MAIN_THREAD_ATTR(PSP_THREAD_ATTR_USER);
